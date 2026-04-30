@@ -1,7 +1,95 @@
+// ── GMAIL IMPORTER ───────────────────────────────────────────────────────
+// No setup needed! GmailApp is built into Google Apps Script.
+// Just make sure HubSpot form notification emails arrive in your Gmail
+// (either directly, or by forwarding from Outlook).
+// Searches by subject so forwarded emails are found regardless of sender.
+// ──────────────────────────────────────────────────────────────────────────
+
+const HUBSPOT_SUBJECT = 'subject:"new submission on the HubSpot Form"';
+
+function safeAlert(msg) {
+  try {
+    SpreadsheetApp.getUi().alert(msg);
+  } catch(e) {
+    Logger.log(msg);
+  }
+}
+
+function importFromOutlook() {
+  const threads = GmailApp.search(`${HUBSPOT_SUBJECT} newer_than:30d`, 0, 50);
+
+  if (threads.length === 0) {
+    safeAlert('No new HubSpot form submissions found in Gmail.');
+    return;
+  }
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const existingData = sheet.getDataRange().getValues();
+  const emailColIndex = existingData[0].indexOf('email');
+
+  const existingEmails = new Set(
+    existingData.slice(1)
+      .filter(row => (row[0] || '').toString().trim() !== '') // only rows with a Firstname
+      .map(row => (row[emailColIndex] || '').toString().trim().toLowerCase())
+  );
+
+  Logger.log(`Email column index: ${emailColIndex}`);
+  Logger.log(`Existing emails in sheet: ${JSON.stringify([...existingEmails])}`);
+  let added = 0;
+  let skipped = 0;
+
+  threads.forEach(thread => {
+    const messages = thread.getMessages();
+    messages.forEach(msg => {
+      const body = msg.getPlainBody();
+      const f = parseHubspotEmail(body);
+
+      Logger.log(`Parsed: ${JSON.stringify(f)}`);
+
+      if (!f.email) { skipped++; return; }
+      if (existingEmails.has(f.email.toLowerCase())) { skipped++; return; }
+
+      sheet.appendRow([
+        f.firstname || '',
+        f.lastname  || '',
+        f.company   || '',
+        f.jobtitle  || '',
+        f.email     || '',
+        f.phone     || '',
+        false
+      ]);
+      // Apply checkbox formatting to the "Link Sent" cell
+      sheet.getRange(sheet.getLastRow(), 7)
+           .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
+      existingEmails.add(f.email.toLowerCase());
+      added++;
+    });
+  });
+
+  safeAlert(
+    `Done! Added ${added} new row(s).` +
+    (skipped > 0 ? `\nSkipped ${skipped} (duplicates or missing email).` : '')
+  );
+}
+
+function parseHubspotEmail(text) {
+  // Strip forwarding quote prefixes ("> ", ">> ", etc.) from each line
+  const cleaned = text.split('\n').map(line => line.replace(/^(>\s*)+/, '')).join('\n');
+  const fields = {};
+  ['firstname', 'lastname', 'company', 'jobtitle', 'email', 'phone'].forEach(key => {
+    // Match "key: value" anywhere in the text, not just at line start
+    const match = cleaned.match(new RegExp(`(?:^|\\n)\\s*${key}:\\s*(.+)`, 'i'));
+    if (match) fields[key] = match[1].trim();
+  });
+  return fields;
+}
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('✉️ CDRF Automail')
-      .addItem('Send to Unchecked Rows', 'sendPendingEmails')
+      .addItem('📥 Import from Gmail', 'importFromOutlook')
+      .addSeparator()
+      .addItem('📨 Send to Unchecked Rows', 'sendPendingEmails')
       .addToUi();
 }
 
@@ -32,7 +120,7 @@ function sendPendingEmails() {
     const isSent = row[linkSentIndex];
     
     // If the checkbox is NOT checked (false or empty), evaluate the row
-    if (isSent === false || isSent === "" || isSent === "FALSE") {
+    if (isSent === false || isSent === '' || isSent === 'FALSE') {
       
       const firstName = row[firstNameIndex] ? row[firstNameIndex].toString().trim() : "";
       const lastName = row[lastNameIndex] ? row[lastNameIndex].toString().trim() : "";
